@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>極簡跑酷遊戲</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap');
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            overflow: hidden;
+            touch-action: none; /* 禁用觸控延遲和縮放 */
+        }
+        canvas {
+            background-color: #111827; /* gray-900 */
+            display: block;
+            border-radius: 0.5rem;
+            cursor: pointer;
+        }
+        /* 得分彈跳動畫 */
+        .score-pop {
+            animation: scorePop 0.3s ease-out;
+        }
+        @keyframes scorePop {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.3); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body class="bg-gray-800 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <!-- 遊戲標題和說明 -->
+    <div class="text-center mb-2">
+        <h1 class="text-4xl font-bold text-red-400">方塊跑酷</h1>
+        <p class="text-gray-400 mt-2">
+            <span class="font-bold">[空白鍵/點擊]</span> 跳躍 (可<span class="font-bold text-yellow-400">三段跳</span>) | <span class="font-bold">[Shift]</span> <span class="font-bold text-pink-400">衝刺</span>
+        </p>
+    </div>
+
+    <!-- 遊戲畫布容器 -->
+    <div class="relative w-full max-w-4xl aspect-video">
+        <canvas id="gameCanvas"></canvas>
+
+        <!-- 遊戲UI -->
+        <div id="uiContainer" class="absolute top-4 left-4 text-2xl font-bold">
+            分數: <span id="scoreEl">0</span>
+        </div>
+
+        <!-- 遊戲開始/結束畫面 -->
+        <div id="modalEl" class="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center">
+            <div id="modalContent" class="bg-gray-700 p-8 rounded-lg text-center shadow-2xl w-full max-w-md">
+                <h1 id="modalScoreEl" class="text-5xl font-bold tracking-tight">0</h1>
+                <p class="text-gray-400 mt-1">最高分</p>
+                <button id="startGameBtn" class="mt-6 bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-full text-lg transition duration-300 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-opacity-75">
+                    開始遊戲
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 變數與常數設定 ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreEl = document.getElementById('scoreEl');
+        const modalEl = document.getElementById('modalEl');
+        const modalScoreEl = document.getElementById('modalScoreEl');
+        const startGameBtn = document.getElementById('startGameBtn');
+
+        let synth;
+
+        const gravity = 0.5;
+        let gameSpeed = 8; // 提高初始速度 (再次提升)
+        const gameSpeedIncrease = 0.002; // 提高加速度 (再次提升)
+        
+        let player, obstacles = [], particles = [], backgroundStars = [], backgroundPlanets = [];
+        let score = 0, highScore = localStorage.getItem('parkourHighScore') || 0;
+        let animationId, spawnTimer = 0;
+        let hue = 0; // 顏色基調 (0 是紅色)
+
+        // --- 類別定義 ---
+        class Player {
+            constructor() {
+                this.width = 40; this.height = 40;
+                this.x = 100; this.y = canvas.height - this.height;
+                this.velocityY = 0; this.jumpsLeft = 3; // 升級為三段跳
+                this.rotation = 0;
+                this.trail = []; // 軌跡陣列
+                this.isDashing = false; this.dashCooldown = 180; this.dashTimer = 0;
+            }
+
+            draw() {
+                // 繪製軌跡
+                this.trail.forEach((t, index) => {
+                    const opacity = 1 - (index / this.trail.length) * 0.8;
+                    ctx.fillStyle = `hsla(${hue}, 80%, 60%, ${opacity})`;
+                    ctx.fillRect(t.x, t.y, this.width, this.height);
+                });
+                
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+                ctx.rotate(this.rotation);
+                ctx.fillStyle = `hsl(${hue}, 80%, 60%)`;
+                const heightScale = this.jumpsLeft < 3 ? 0.8 : 1;
+                const widthScale = this.jumpsLeft < 3 ? 1.2 : 1;
+                ctx.fillRect(-this.width * widthScale / 2, -this.height * heightScale / 2, this.width * widthScale, this.height * heightScale);
+                ctx.restore();
+            }
+
+            update() {
+                // 更新軌跡
+                this.trail.unshift({ x: this.x, y: this.y });
+                if (this.trail.length > 15) {
+                    this.trail.pop();
+                }
+
+                this.draw();
+                this.y += this.velocityY;
+                this.dashTimer > 0 && this.dashTimer--;
+
+                if (this.isDashing) {
+                    this.x += 10;
+                    if (this.x + this.width > canvas.width) this.x = canvas.width - this.width;
+                    createParticles(this.x, this.y + this.height / 2, `hsl(${hue + 180}, 80%, 70%)`);
+                }
+
+                if (this.y + this.height < canvas.height) {
+                    this.rotation += 0.05;
+                } else {
+                    this.rotation = 0;
+                }
+
+                if (this.y + this.height + this.velocityY < canvas.height) {
+                    this.velocityY += gravity;
+                } else {
+                    this.velocityY = 0;
+                    this.y = canvas.height - this.height;
+                    this.jumpsLeft = 3; // 重置三段跳
+                }
+            }
+
+            jump() {
+                if (this.jumpsLeft > 0) {
+                    this.velocityY = -12;
+                    this.jumpsLeft--;
+                    if(synth) synth.triggerAttackRelease(this.jumpsLeft === 2 ? "C5" : (this.jumpsLeft === 1 ? "E5" : "G5"), "8n");
+                }
+            }
+            
+            dash() {
+                if (this.dashTimer <= 0) {
+                    this.isDashing = true;
+                    if(synth) synth.triggerAttackRelease("A5", "16n");
+                    setTimeout(() => { this.isDashing = false; }, 150); // 衝刺持續時間
+                    this.dashTimer = this.dashCooldown;
+                }
+            }
+        }
+
+        class Obstacle {
+            constructor() {
+                this.width = Math.random() * (80 - 30) + 30;
+                this.x = canvas.width;
+                this.color = `hsl(${(hue + 150) % 360}, 70%, 50%)`;
+
+                // 隨機決定障礙物類型，增加難度
+                const type = Math.random();
+                if (type > 0.8 && score > 10) { // 浮空障礙物 (遊戲開始一小段時間後出現)
+                    this.height = Math.random() * (50 - 20) + 20;
+                    this.y = canvas.height - this.height - (Math.random() * 80 + 50); // 浮在 50-130 像素高
+                } else if (type > 0.6 && score > 5) { // 較高的地面障礙物
+                    this.height = Math.random() * (100 - 60) + 60;
+                    this.y = canvas.height - this.height;
+                } else { // 普通地面障礙物
+                    this.height = Math.random() * (60 - 20) + 20;
+                    this.y = canvas.height - this.height;
+                }
+            }
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+            }
+            update() {
+                this.draw();
+                this.x -= gameSpeed;
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x; this.y = y; this.color = color;
+                this.radius = Math.random() * 2 + 1;
+                this.velocity = { x: (Math.random() - 0.5) * 4, y: (Math.random() - 0.5) * 4 };
+                this.alpha = 1; this.friction = 0.98;
+            }
+            draw() {
+                ctx.save(); ctx.globalAlpha = this.alpha;
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color; ctx.fill(); ctx.restore();
+            }
+            update() {
+                this.draw(); this.velocity.x *= this.friction; this.velocity.y *= this.friction;
+                this.x += this.velocity.x; this.y += this.velocity.y; this.alpha -= 0.02;
+            }
+        }
+        
+        class BackgroundStar {
+             constructor(x, y, radius, color, speedModifier) {
+                this.x = x; this.y = y; this.radius = radius; this.color = color;
+                this.speedModifier = speedModifier;
+            }
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
+            }
+            update() {
+                this.draw();
+                this.x -= gameSpeed * this.speedModifier;
+                if (this.x + this.radius < 0) {
+                    this.x = canvas.width + this.radius;
+                }
+            }
+        }
+
+        class Planet {
+            constructor() {
+                this.radius = Math.random() * 50 + 20; // 20 to 70 radius
+                this.x = canvas.width + this.radius + Math.random() * canvas.width;
+                this.y = Math.random() * (canvas.height * 0.6); // Appear in the upper 60% of the screen
+                this.color = {
+                    body: `hsl(${Math.random() * 360}, 50%, 30%)`,
+                    ring: `hsla(${Math.random() * 360}, 50%, 50%, 0.5)`
+                };
+                this.hasRing = Math.random() > 0.6;
+                this.speedModifier = Math.random() * 0.05 + 0.02; // Very slow
+            }
+
+            draw() {
+                ctx.fillStyle = this.color.body;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                if (this.hasRing) {
+                    ctx.strokeStyle = this.color.ring;
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.ellipse(this.x, this.y, this.radius * 1.5, this.radius * 0.5, -0.2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+
+            update() {
+                this.draw();
+                this.x -= gameSpeed * this.speedModifier;
+                if (this.x + this.radius * 2 < 0) {
+                    this.radius = Math.random() * 50 + 20;
+                    this.x = canvas.width + this.radius + Math.random() * canvas.width;
+                    this.y = Math.random() * (canvas.height * 0.6);
+                }
+            }
+        }
+
+        // --- 遊戲功能 ---
+        function init() {
+            player = new Player();
+            obstacles = []; particles = []; backgroundStars = []; backgroundPlanets = [];
+            score = 0; gameSpeed = 5; spawnTimer = 0; hue = 200;
+            scoreEl.textContent = 0;
+            modalScoreEl.textContent = highScore;
+            
+            for(let i = 0; i < 100; i++) {
+                const x = Math.random() * canvas.width;
+                const y = Math.random() * canvas.height;
+                const radius = Math.random() * 1.5;
+                const speedModifier = Math.random() * 0.4 + 0.1;
+                backgroundStars.push(new BackgroundStar(x, y, radius, 'rgba(255, 255, 255, 0.5)', speedModifier));
+            }
+             for(let i = 0; i < 3; i++) {
+                backgroundPlanets.push(new Planet());
+            }
+        }
+
+        function createParticles(x, y, color) {
+            for (let i = 0; i < 5; i++) {
+                particles.push(new Particle(x, y, color));
+            }
+        }
+
+        function animate() {
+            animationId = requestAnimationFrame(animate);
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.4)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            hue = (hue + 0.1) % 360; 
+
+            backgroundPlanets.forEach(p => p.update());
+            backgroundStars.forEach(star => star.update());
+            
+            player.update();
+
+            particles.forEach((p, index) => {
+                if (p.alpha <= 0) particles.splice(index, 1);
+                else p.update();
+            });
+
+            spawnTimer++;
+            if (spawnTimer > 100 / (gameSpeed / 5)) { // 縮短生成間隔
+                obstacles.push(new Obstacle());
+                spawnTimer = 0;
+            }
+
+            obstacles.forEach((obstacle, index) => {
+                obstacle.update();
+
+                if (player.x < obstacle.x + obstacle.width && player.x + player.width > obstacle.x && player.y < obstacle.y + obstacle.height && player.y + player.height > obstacle.y) {
+                    gameOver();
+                }
+
+                if (obstacle.x + obstacle.width < player.x && !obstacle.passed) {
+                    obstacle.passed = true;
+                    score++;
+                    scoreEl.textContent = score;
+                    scoreEl.classList.add('score-pop');
+                    scoreEl.addEventListener('animationend', () => {
+                        scoreEl.classList.remove('score-pop');
+                    }, { once: true });
+                    
+                    if(synth && score % 5 === 0) synth.triggerAttackRelease("G5", "16n");
+                }
+                
+                if (obstacle.x + obstacle.width < 0) {
+                     setTimeout(() => { obstacles.splice(index, 1); }, 0);
+                }
+            });
+            
+            gameSpeed += gameSpeedIncrease;
+        }
+
+        function gameOver() {
+            cancelAnimationFrame(animationId);
+            if(synth) synth.triggerAttackRelease("C3", "4n");
+            createParticles(player.x + player.width / 2, player.y + player.height / 2, `hsl(${hue}, 80%, 60%)`);
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('parkourHighScore', highScore);
+            }
+            modalScoreEl.textContent = score;
+            document.getElementById('modalContent').querySelector('p').textContent = `最高分: ${highScore}`;
+            modalEl.style.display = 'flex';
+        }
+
+        // --- 事件監聽 ---
+        startGameBtn.addEventListener('click', () => {
+             if (Tone.context.state !== 'running') {
+                Tone.start();
+            }
+            synth = new Tone.Synth().toDestination();
+            init();
+            animate();
+            modalEl.style.display = 'none';
+        });
+
+        function handleJump(e) {
+            if (animationId) { e.preventDefault(); player.jump(); }
+        }
+        
+        function handleDash(e) {
+            if (animationId) { e.preventDefault(); player.dash(); }
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') handleJump(e);
+            if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') handleDash(e);
+        });
+        canvas.addEventListener('mousedown', handleJump);
+        canvas.addEventListener('touchstart', handleJump);
+        
+        // --- 響應式畫布 ---
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            const aspectRatio = 16 / 9;
+            let newWidth = container.clientWidth;
+            let newHeight = newWidth / aspectRatio;
+            if (newHeight > container.clientHeight) {
+                newHeight = container.clientHeight;
+                newWidth = newHeight * aspectRatio;
+            }
+            canvas.width = 1024; 
+            canvas.height = 576;
+            canvas.style.width = `${newWidth}px`;
+            canvas.style.height = `${newHeight}px`;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        
+        // --- 遊戲初始化 ---
+        resizeCanvas();
+        modalScoreEl.textContent = highScore;
+        document.getElementById('modalContent').querySelector('p').textContent = `最高分: ${highScore}`;
+    </script>
+</body>
+</html>
+
+
+
+
